@@ -2,92 +2,133 @@ import numpy as np
 import cupy as cp
 import time
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}")
 
-def gpu_dot(A, B):
-    try:
+def cpu_operation(A, B, C, repeats=5):
+    """Compute AxBxC + A on CPU, averaged over `repeats` runs"""
+    times = []
+    for _ in range(repeats):
         start = time.time()
-        C = cp.dot(A, B)
-        cp.cuda.Stream.null.synchronize()
-        return time.time() - start
+        temp = np.dot(A, B)
+        result = np.dot(temp, C) + A
+        times.append(time.time() - start)
+    return sum(times) / repeats
+
+def gpu_operation(A, B, C, repeats=5):
+    """Compute AxBxC + A on GPU, averaged over `repeats` runs"""
+    try:
+        times = []
+        for _ in range(repeats):
+            start = time.time()
+            temp = cp.dot(A, B)
+            result = cp.dot(temp, C) + A
+            cp.cuda.Stream.null.synchronize()  # Ensure completion
+            times.append(time.time() - start)
+        return sum(times) / repeats
     except cp.cuda.memory.OutOfMemoryError:
         return None
 
-def benchmark_matrix_multiplication(sizes):
+def benchmark_operations(sizes, repeats=5):
+    """Benchmark CPU and GPU performance for different matrix sizes"""
     results = []
 
     for N in sizes:
         log(f"\n===== Testing matrix size: {N}x{N} =====")
 
-        log("CPU: Generating matrices")
+        # Generate random matrices
+        log("Generating matrices")
         A = np.random.rand(N, N).astype(np.float32)
         B = np.random.rand(N, N).astype(np.float32)
-        log("CPU: Starting multiplication")
-        start_cpu = time.time()
-        C = np.dot(A, B)
-        cpu_time = time.time() - start_cpu
-        log(f"CPU time: {cpu_time:.2f} s")
+        C = np.random.rand(N, N).astype(np.float32)
 
-        log("GPU: Generating matrices")
+        # CPU benchmark
+        log("CPU: Starting operation")
+        cpu_time = cpu_operation(A, B, C, repeats)
+        log(f"CPU avg time: {cpu_time:.2f} s")
+
+        # GPU benchmark
+        log("GPU: Starting operation")
         try:
             A_gpu = cp.asarray(A)
             B_gpu = cp.asarray(B)
-            log("GPU: Starting multiplication")
-            gpu_time = gpu_dot(A_gpu, B_gpu)
+            C_gpu = cp.asarray(C)
+            gpu_time = gpu_operation(A_gpu, B_gpu, C_gpu, repeats)
+            
             if gpu_time is None:
                 log("GPU: Out of memory, skipping...")
             else:
-                log(f"GPU time: {gpu_time:.2f} s")
+                log(f"GPU avg time: {gpu_time:.2f} s")
         except cp.cuda.memory.OutOfMemoryError:
             gpu_time = None
             log("GPU: Out of memory during matrix allocation")
 
+        # Calculate speedup if GPU succeeded
         speedup = cpu_time / gpu_time if gpu_time else None
         results.append((N, cpu_time, gpu_time, speedup))
 
     return results
 
 def plot_results(results):
-    # Prepare data for plotting
+    """Create interactive performance plots (no speedup shown)"""
     sizes = [r[0] for r in results]
     cpu_times = [r[1] for r in results]
-    gpu_times = [r[2] if r[2] is not None else float('nan') for r in results]
+    gpu_times = [r[2] if r[2] is not None else None for r in results]
 
-    # Create a Plotly figure
     fig = go.Figure()
 
-    # Plot CPU times
-    fig.add_trace(go.Scatter(x=sizes, y=cpu_times, mode='lines+markers', name='CPU Time (s)', line=dict(color='blue')))
-
-    # Plot GPU times
-    fig.add_trace(go.Scatter(x=sizes, y=gpu_times, mode='lines+markers', name='GPU Time (s)', line=dict(color='green')))
+    # Add execution time traces
+    fig.add_trace(
+        go.Scatter(
+            x=sizes, y=cpu_times, 
+            name="CPU Time", 
+            line=dict(color='royalblue', width=3),
+            mode='lines+markers'
+        )
+    )
+    
+    fig.add_trace(
+        go.Scatter(
+            x=sizes, y=gpu_times, 
+            name="GPU Time", 
+            line=dict(color='limegreen', width=3),
+            mode='lines+markers'
+        )
+    )
 
     # Update layout
     fig.update_layout(
-        title='Matrix Multiplication Benchmark',
-        xaxis_title='Matrix Size (NxN)',
-        yaxis_title='Time (s)',
-        legend_title='Legend',
-        template='plotly_dark'
+        title="Matrix Operation Benchmark: AxBxC + A",
+        xaxis_title="Matrix Size (NxN)",
+        yaxis_title="Execution Time (s)",
+        template="plotly_dark",
+        hovermode="x unified",
+        height=600
     )
-
+    
+    fig.write_html("benchmark_results.html")
     fig.show()
 
-def print_speedup(results):
-    print("\n==== SUMMARY ====")
-    print(f"{'Size':>10} | {'CPU Time':>10} | {'GPU Time':>10} | {'Speedup':>8}")
-    print("-" * 46)
-    for N, c_time, g_time, spd in results:
-        if spd:
-            print(f"{N:10d} | {c_time:10.2f} | {g_time if g_time else 'OOM':>10} | {spd:.2f}")
-        else:
-            print(f"{N:10d} | {c_time:10.2f} | {'OOM':>10} | {'--':>8}")
+def print_summary(results):
+    """Print formatted benchmark results with speedup"""
+    print("\n" + "="*60)
+    print(f"{'MATRIX SIZE':>12} | {'CPU TIME (s)':>12} | {'GPU TIME (s)':>12} | {'SPEEDUP':>12}")
+    print("="*60)
+    
+    for N, cpu, gpu, spd in results:
+        gpu_str = f"{gpu:.4f}" if gpu else "OOM"
+        spd_str = f"{spd:.2f}x" if spd else "---"
+        print(f"{N:12} | {cpu:12.4f} | {gpu_str:>12} | {spd_str:>12}")
 
 if __name__ == "__main__":
-    # Test sizes: small to large
-    test_sizes = [128, 512, 1024, 2048, 4096, 8192, 10000, 12000, 16000]
-    results = benchmark_matrix_multiplication(test_sizes)
+    test_sizes = [128, 256, 512, 1024, 2048, 4096, 8192, 10000]
+    
+    log("Starting benchmark...")
+    results = benchmark_operations(test_sizes, repeats=5)
+    
     plot_results(results)
-    print_speedup(results)
+    print_summary(results)
+    
+    log("Benchmark completed. Results saved to 'benchmark_results.html'")
